@@ -1,73 +1,63 @@
-import tkinter as tk
-from tkinter import filedialog, messagebox, scrolledtext
-from tkinter import ttk  # เพิ่มสำหรับ Combobox
-from PIL import Image, ImageTk, ImageOps
-import requests
+# Standard library imports
 import os
-# เพิ่ม import สำหรับ excel
-import openpyxl
-import fitz  # เพิ่มบรรทัดนี้
-from openpyxl.utils import get_column_letter
+import tkinter as tk
+from tkinter import filedialog, messagebox, scrolledtext, ttk
 import tkinter.font as tkfont
 from functools import partial
-import json  # เพิ่มสำหรับอ่านไฟล์ json
+import json
 
+# Third-party imports
+from PIL import Image, ImageTk, ImageOps
+import requests
+import openpyxl
+import fitz
+from openpyxl.utils import get_column_letter
+
+# Constants
 API_KEY = 'ZlA0wiVWdf8AvPodV4MCrXIxs3rcIDAx'
 OCR_URL = "https://api.iapp.co.th/ocr/v3/receipt/file"
+FONT_FAMILY = "TH Niramit AS"
+DEFAULT_FONT_SIZE = 16
+PREVIEW_WIDTH = 350  # ขนาดความกว้างของ preview (ลดลง)
+PREVIEW_HEIGHT = 450  # ขนาดความสูงของ preview (ลดลง)
 
 class OCRApp:
     def __init__(self, root):
         self.root = root
-        self.root.title("OCR Invoice Extractor")
+        self.root.title("ACCESS OCR")
         self.root.geometry("1200x800")
         self.root.configure(bg="#e9ecef")
 
-        # --- Modern style ---
-        style = ttk.Style()
-        style.theme_use("clam")
-        style.configure("TButton", font=("TH Niramit AS", 16), padding=6)
-        style.configure("TEntry", font=("TH Niramit AS", 16))
-        style.configure("TCombobox", font=("TH Niramit AS", 16))
-        style.configure("TCheckbutton", font=("TH Niramit AS", 16), background="#f5f5f5")
-        style.configure("TLabel", font=("TH Niramit AS", 16), background="#f5f5f5")
-        style.map("TButton", background=[("active", "#1ca21c")])
+        # --- สำหรับ multi-image ---
+        self.image_paths = []
+        self.current_image_index = 0
 
-        # --- Main window layout (no scroll) ---
-        self.main_frame = tk.Frame(root, background="#e9ecef")
-        self.main_frame.pack(fill="both", expand=True)
+        self._setup_styles()
+        self._setup_main_frame()
 
-        # --- Responsive grid config ---
-        self.main_frame.grid_columnconfigure(0, weight=0)  # left panel fixed
-        self.main_frame.grid_columnconfigure(1, weight=0)
-        self.main_frame.grid_columnconfigure(2, weight=1)  # right panel flex
+        # --- สร้าง left_panel รวม preview + ปุ่ม ---
+        left_panel = tk.Frame(self.main_frame, bg="#e9ecef")
+        left_panel.grid(row=0, column=0, rowspan=2, padx=(20,10), pady=(20,10), sticky="ns")
 
-        self.file_path = None
-        self.ocr_data = {}
+        # สร้าง preview_frame ใน left_panel และ pack
+        self.preview_frame = tk.Frame(left_panel, bg="#fff", height=PREVIEW_HEIGHT+60, width=PREVIEW_WIDTH+20)
+        self.preview_frame.pack(side="top", fill="x", padx=0, pady=0)
 
-        # Left: Image preview (flexible size, white bg)
-        self.preview_width = 350
-        self.preview_height = 500
-        self.img_canvas = tk.Canvas(
-            self.main_frame, bg="#fff", bd=0, relief=tk.RIDGE,
-            highlightthickness=1, highlightbackground="#bbb",
-            width=self.preview_width, height=self.preview_height
-        )
-        self.img_canvas.grid(row=0, column=0, rowspan=1, padx=(20,10), pady=(20,5), sticky="nw")
-        self.main_frame.grid_rowconfigure(0, weight=1)
-        self.main_frame.grid_columnconfigure(0, weight=1)  # เปลี่ยนจาก 0 เป็น 1 เพื่อให้ canvas ขยาย flex ได้
-        self.tk_img = None  # Keep reference
+        self._setup_preview_frame()
 
-        # --- ปุ่ม Zoom/Reset ใต้กรอบภาพ ---
-        zoom_frame = tk.Frame(self.main_frame, bg="#e9ecef")
-        zoom_frame.grid(row=2, column=0, padx=(20,10), pady=(0,0), sticky="nw")
-        ttk.Button(zoom_frame, text="Zoom In", command=self.zoom_in, width=10).pack(side="left", padx=(0,6))
-        ttk.Button(zoom_frame, text="Zoom Out", command=self.zoom_out, width=10).pack(side="left", padx=(0,6))
-        ttk.Button(zoom_frame, text="Reset", command=self.reset_zoom, width=10).pack(side="left")
+        # --- ปุ่ม Prev/Next ใต้ preview ---
+        nav_frame = tk.Frame(self.preview_frame, bg="#fff")
+        nav_frame.pack(side="bottom", pady=(2, 0))
+        self.prev_btn = ttk.Button(nav_frame, text="⟨ Prev", width=8, command=self.show_prev_image)
+        self.prev_btn.pack(side="left", padx=4)
+        self.next_btn = ttk.Button(nav_frame, text="Next ⟩", width=8, command=self.show_next_image)
+        self.next_btn.pack(side="left", padx=4)
+        self.update_nav_buttons()
 
-        # --- ปุ่มอยู่ใต้กรอบภาพ ---
-        btns_frame_left = tk.Frame(self.main_frame, bg="#e9ecef")
-        btns_frame_left.grid(row=1, column=0, padx=(20,10), pady=(0,10), sticky="new")
-        button_width = 22  # ปรับขนาดความยาวปุ่มที่นี่
+        # วางปุ่มไว้ด้านล่าง left_panel
+        btns_frame_left = tk.Frame(left_panel, bg="#e9ecef")
+        btns_frame_left.pack(side="bottom", fill="x", pady=(10,0))
+        button_width = 22
         ttk.Button(btns_frame_left, text="Upload File", command=self.select_file, width=button_width).pack(fill="x", pady=(0,6))
         ttk.Button(btns_frame_left, text="ประมวลผล OCR", command=self.process_ocr, width=button_width).pack(fill="x", pady=(0,6))
         ttk.Button(btns_frame_left, text="Export เป็น Excel", command=self.export_excel, width=button_width).pack(fill="x")
@@ -90,13 +80,14 @@ class OCRApp:
         self.entries = {}
         self.field_vars = {}  # เพิ่ม dict สำหรับเก็บตัวแปร checkbox
 
+        # Document Info frame (right panel, top)
         doc_frame = tk.LabelFrame(
             self.main_frame,
             text="Document Info",
-            font=("TH Niramit AS", 16, "bold"),
+            font=(FONT_FAMILY, DEFAULT_FONT_SIZE, "bold"),
             bg="#f5f5f5", bd=2, relief=tk.GROOVE, labelanchor="nw", padx=12, pady=10
         )
-        doc_frame.grid(row=0, column=1, columnspan=2, padx=(10,20), pady=(20,10), sticky="new")
+        doc_frame.grid(row=0, column=1, padx=(10,20), pady=(20,10), sticky="new")  # <-- remove columnspan
         doc_frame.grid_columnconfigure(2, weight=1)  # ปรับให้ช่องผลลัพธ์ขยาย
 
         for idx, (label, key) in enumerate(self.fields):
@@ -105,7 +96,7 @@ class OCRApp:
             cb = tk.Checkbutton(
                 doc_frame, variable=var, bg="#f5f5f5", activebackground="#f5f5f5",
                 selectcolor="#f5f5f5", indicatoron=True, width=2, padx=8, pady=8,
-                font=("TH Niramit AS", 16)
+                font=(FONT_FAMILY, DEFAULT_FONT_SIZE)
             )
             cb.grid(row=idx, column=0, sticky="w", padx=(0,10), pady=8)
             ttk.Label(doc_frame, text=label, anchor="w", width=18).grid(
@@ -113,18 +104,28 @@ class OCRApp:
             )
             # ช่องผลลัพธ์อยู่ติดกับ label
             if key == "supplierName" and self.supplier_names:
-                entry = ttk.Combobox(doc_frame, values=self.supplier_names, width=44, font=("TH Niramit AS", 16))
+                entry = ttk.Combobox(doc_frame, values=self.supplier_names, width=44, font=(FONT_FAMILY, DEFAULT_FONT_SIZE))
             else:
-                entry = ttk.Entry(doc_frame, width=46, font=("TH Niramit AS", 16))
+                entry = ttk.Entry(doc_frame, width=46, font=(FONT_FAMILY, DEFAULT_FONT_SIZE))
             entry.grid(row=idx, column=2, padx=(0,10), pady=8, sticky="ew")
             self.entries[key] = entry
 
         # สำหรับซ่อน/แสดงตารางสินค้า
         self.items_table_visible = True
 
-        # Items section (table-like)
-        table_frame = tk.LabelFrame(self.main_frame, text="Product List", font=("Segoe UI", 13, "bold"), bg="#f5f5f5", bd=2, relief=tk.GROOVE, labelanchor="nw", padx=10, pady=8)
-        table_frame.grid(row=1, column=1, columnspan=2, padx=(10,20), pady=(0,10), sticky="nsew")
+        # Product List frame (right panel, bottom)
+        table_frame = tk.LabelFrame(
+            self.main_frame, 
+            text="Product List",
+            font=("Segoe UI", 13, "bold"),
+            bg="#f5f5f5",
+            bd=2,
+            relief=tk.GROOVE,
+            labelanchor="nw",
+            padx=10,
+            pady=8
+        )
+        table_frame.grid(row=1, column=1, padx=(10,20), pady=(10,10), sticky="nsew")  # <-- remove columnspan
         table_frame.grid_columnconfigure(0, weight=1)
 
         # --- Canvas + Scrollbar for items table ---
@@ -155,78 +156,276 @@ class OCRApp:
         self.show_empty_preview()
         self.show_items_table([])
 
+        # Adjust grid weights for resizing
+        self.main_frame.grid_rowconfigure(0, weight=0)  # Document Info row
+        self.main_frame.grid_rowconfigure(1, weight=1)  # Product List row grows
+        self.main_frame.grid_columnconfigure(0, weight=0)  # left panel fixed
+        self.main_frame.grid_columnconfigure(1, weight=1)  # right panel flexible
+
+    def _setup_styles(self):
+        """Setup TTK styles for the application"""
+        style = ttk.Style()
+        style.theme_use("clam")
+        
+        # Configure common styles
+        style.configure("TButton", 
+            font=(FONT_FAMILY, DEFAULT_FONT_SIZE), 
+            padding=6
+        )
+        style.configure("TEntry", 
+            font=(FONT_FAMILY, DEFAULT_FONT_SIZE)
+        )
+        style.configure("TCombobox", 
+            font=(FONT_FAMILY, DEFAULT_FONT_SIZE)
+        )
+        style.configure("TCheckbutton", 
+            font=(FONT_FAMILY, DEFAULT_FONT_SIZE), 
+            background="#f5f5f5"
+        )
+        style.configure("TLabel", 
+            font=(FONT_FAMILY, DEFAULT_FONT_SIZE), 
+            background="#f5f5f5"
+        )
+        
+        # Configure Zoom button style
+        style.configure("Zoom.TButton",
+            font=(FONT_FAMILY, 12),
+            padding=4,
+            background="#f8f9fa",
+            relief="flat"
+        )
+        style.map("TButton", 
+            background=[("active", "#1ca21c")]
+        )
+        style.map("Zoom.TButton",
+            background=[("active", "#e9ecef")],
+            relief=[("pressed", "sunken")]
+        )
+
+    def _setup_main_frame(self):
+        """Setup the main application frame"""
+        self.main_frame = tk.Frame(self.root, background="#e9ecef")
+        self.main_frame.pack(fill="both", expand=True)
+        
+        # Configure grid weights
+        self.main_frame.grid_columnconfigure(0, weight=0)  # left panel fixed
+        self.main_frame.grid_columnconfigure(1, weight=0)
+        self.main_frame.grid_columnconfigure(1, weight=1)  # right panel flex
+
+    def _setup_preview_frame(self):
+        """Setup the image preview frame"""
+        # self.preview_frame ถูกสร้างและ pack ใน __init__ แล้ว
+        preview_container = tk.Frame(self.preview_frame, bg="#fff")
+        preview_container.pack(anchor="n")  # ให้ติดบน
+        self._setup_preview_canvas(preview_container)
+        self._setup_zoom_controls()
+
+    def _setup_preview_canvas(self, container):
+        """Setup canvas and scrollbars for image preview"""
+        canvas_container = tk.Frame(container, bg="#fff")
+        canvas_container.pack(side="top")
+
+        self.preview_canvas = tk.Canvas(
+            canvas_container,
+            bg="#fff",
+            width=PREVIEW_WIDTH,
+            height=PREVIEW_HEIGHT
+        )
+        self.preview_canvas.pack(side="left")
+
+        # Add scrollbars
+        self.preview_scrolly = ttk.Scrollbar(
+            canvas_container,
+            orient="vertical",
+            command=self.preview_canvas.yview
+        )
+        self.preview_scrolly.pack(side="right", fill="y")
+
+        self.preview_scrollx = ttk.Scrollbar(
+            container,
+            orient="horizontal",
+            command=self.preview_canvas.xview
+        )
+        self.preview_scrollx.pack(side="bottom", fill="x")
+
+        self.preview_canvas.configure(
+            yscrollcommand=self.preview_scrolly.set,
+            xscrollcommand=self.preview_scrollx.set
+        )
+
+    def _setup_zoom_controls(self):
+        """Setup zoom controls for image preview"""
+        zoom_frame = tk.Frame(self.preview_frame, bg="#fff", height=40)  # กำหนดความสูงคงที่
+        zoom_frame.pack(side="bottom", fill="x", pady=(5,5))
+        zoom_frame.pack_propagate(False)  # ป้องกันไม่ให้ frame หดตามเนื้อหา
+
+        # จัดกลุ่มปุ่มให้อยู่กลาง
+        btn_group = tk.Frame(zoom_frame, bg="#fff")
+        btn_group.pack(expand=True)  # ใช้ expand=True เพื่อให้อยู่ตรงกลาง
+
+        # สร้างปุ่มด้วย style ใหม่
+        ttk.Button(
+            btn_group,
+            text="🔍+",
+            command=self.zoom_in,
+            width=6,
+            style="Zoom.TButton"
+        ).pack(side="left", padx=2)
+
+        ttk.Button(
+            btn_group,
+            text="🔍-",
+            command=self.zoom_out,
+            width=6,
+            style="Zoom.TButton"
+        ).pack(side="left", padx=2)
+
+        ttk.Button(
+            btn_group,
+            text="↺ Reset",
+            command=self.reset_zoom,
+            width=8,
+            style="Zoom.TButton"
+        ).pack(side="left", padx=2)
+
+        # เพิ่มข้อความแสดงอัตราส่วน zoom
+        self.zoom_label = tk.Label(
+            btn_group,  # ย้ายไปอยู่ใน btn_group
+            text="100%",
+            font=(FONT_FAMILY, 12),
+            bg="#fff",
+            fg="#6c757d"
+        )
+        self.zoom_label.pack(side="left", padx=5)
+        # --- เพิ่ม mouse drag scroll ---
+        self.preview_canvas.bind("<ButtonPress-1>", self._start_drag)
+        self.preview_canvas.bind("<B1-Motion>", self._on_drag)
+        # ไม่จำเป็นต้องใช้ <ButtonRelease-1> สำหรับ scroll แบบนี้
+
+    def _start_drag(self, event):
+        self.preview_canvas.scan_mark(event.x, event.y)
+
+    def _on_drag(self, event):
+        self.preview_canvas.scan_dragto(event.x, event.y, gain=1)
+
     def show_empty_preview(self):
-        self.img_canvas.delete("all")
-        self.img_canvas.config(width=self.preview_width, height=self.preview_height)
-        self.img_canvas.create_rectangle(0, 0, self.preview_width, self.preview_height, fill="white", outline="")
+        self.preview_canvas.delete("all")
+        # ใช้ค่า constants แทนการกำหนดค่าตายตัว
+        self.preview_width = PREVIEW_WIDTH
+        self.preview_height = PREVIEW_HEIGHT
+        self.preview_canvas.config(width=self.preview_width, height=self.preview_height)
+        self.preview_canvas.create_rectangle(
+            0, 0, 
+            self.preview_width, 
+            self.preview_height, 
+            fill="white", 
+            outline=""
+        )
+
+    def update_nav_buttons(self):
+        # Enable/disable prev/next buttons
+        if not self.image_paths or len(self.image_paths) == 1:
+            self.prev_btn.state(['disabled'])
+            self.next_btn.state(['disabled'])
+        else:
+            if self.current_image_index <= 0:
+                self.prev_btn.state(['disabled'])
+            else:
+                self.prev_btn.state(['!disabled'])
+            if self.current_image_index >= len(self.image_paths) - 1:
+                self.next_btn.state(['disabled'])
+            else:
+                self.next_btn.state(['!disabled'])
 
     def select_file(self):
         filetypes = [
+            ("Image files", "*.png;*.jpg;*.jpeg;*"),
             ("PDF files", "*.pdf"),
-            ("Image files", "*.png;*.jpg;*.jpeg;*.bmp"),
-            ("All supported", "*.png;*.jpg;*.jpeg;*.bmp;*.pdf"),
-            ("All files", "*.*")
         ]
-        path = filedialog.askopenfilename(title="เลือกไฟล์ภาพหรือ PDF", filetypes=filetypes)
-        if path:
-            self.file_path = path
-            ext = os.path.splitext(path)[1].lower()
-            if ext == ".pdf":
-                try:
-                    img = self.pdf_page_to_image(path, page_num=0)
-                    img = ImageOps.exif_transpose(img)
-                    self.original_img = img.copy()
-                    self.zoom_ratio = 1.0
-                    self.display_image(img)
-                except Exception as e:
-                    messagebox.showerror("Error", f"PDF preview failed: {e}")
-                    self.show_empty_preview()
-            else:
-                try:
-                    img = Image.open(path)
-                    img = ImageOps.exif_transpose(img)
-                    self.original_img = img.copy()
-                    self.zoom_ratio = 1.0
-                    self.display_image(img)
-                except Exception as e:
-                    messagebox.showerror("Error", f"Open image failed: {e}")
-                    self.show_empty_preview()
+        paths = filedialog.askopenfilenames(title="เลือกไฟล์ภาพหรือ PDF", filetypes=filetypes)
+        if paths:
+            self.image_paths = list(paths)
+            self.current_image_index = 0
+            self.show_image_at_index(self.current_image_index)
         else:
+            self.image_paths = []
+            self.current_image_index = 0
             self.show_empty_preview()
+        self.update_nav_buttons()
 
-    def display_image(self, img):
-        # ปรับขนาด canvas ให้เท่ากับขนาดภาพ
+    def show_image_at_index(self, idx):
+        if not self.image_paths:
+            self.show_empty_preview()
+            return
+        path = self.image_paths[idx]
+        ext = os.path.splitext(path)[1].lower()
+        try:
+            if ext == ".pdf":
+                img = self.pdf_page_to_image(path, page_num=0)
+            else:
+                img = Image.open(path)
+            img = ImageOps.exif_transpose(img)
+            self.original_img = img.copy()
+            self.zoom_ratio = 1.0
+            self.display_image(img)
+        except Exception as e:
+            messagebox.showerror("Error", f"Open image failed: {e}")
+            self.show_empty_preview()
+        self.update_nav_buttons()
+
+    def show_prev_image(self):
+        if self.image_paths and self.current_image_index > 0:
+            self.current_image_index -= 1
+            self.show_image_at_index(self.current_image_index)
+
+    def show_next_image(self):
+        if self.image_paths and self.current_image_index < len(self.image_paths) - 1:
+            self.current_image_index += 1
+            self.show_image_at_index(self.current_image_index)
+
+    def display_image(self, img, zoom=False):
+        # คำนวณขนาดภาพให้พอดีกับ canvas หรือขยายตาม zoom
         w, h = img.size
-        self.img_canvas.config(width=w, height=h)
-        self.img_canvas.delete("all")
-        self.tk_img = ImageTk.PhotoImage(img)
-        self.img_canvas.create_image(0, 0, anchor="nw", image=self.tk_img)
-        self.current_img = img
-        # อัปเดตขนาด preview_width/preview_height ด้วย (ถ้าต้องการให้ zoom ใช้ขนาดนี้)
-        self.preview_width = w
-        self.preview_height = h
+        if zoom:
+            # ขยายตาม self.zoom_ratio
+            new_size = (max(1, int(w * self.zoom_ratio)), max(1, int(h * self.zoom_ratio)))
+        else:
+            # ย่อให้พอดี preview panel
+            ratio = min(PREVIEW_WIDTH / w, PREVIEW_HEIGHT / h)
+            self.zoom_ratio = ratio  # sync zoom_ratio กับ preview
+            new_size = (int(w * ratio), int(h * ratio))
+        resized_img = img.resize(new_size, Image.LANCZOS)
+        self.tk_img = ImageTk.PhotoImage(resized_img)
+        self.preview_canvas.delete("all")
+        x = (PREVIEW_WIDTH - new_size[0]) // 2
+        y = (PREVIEW_HEIGHT - new_size[1]) // 2
+        self.preview_canvas.create_image(x, y, anchor="nw", image=self.tk_img)
+        self.preview_canvas.configure(scrollregion=self.preview_canvas.bbox("all"))
+        self.current_img = resized_img
+        # อัปเดตข้อความแสดงอัตราส่วน zoom
+        zoom_percent = int(self.zoom_ratio * 100)
+        self.zoom_label.config(text=f"{zoom_percent}%")
 
     def zoom_in(self):
-        if self.current_img is not None:
-            self.zoom_ratio *= 1.2
-            self._zoom_display()
+        if self.original_img is not None:
+            prev_zoom = self.zoom_ratio
+            self.zoom_ratio *= 1.05  # เพิ่มทีละ 5%
+            percent_change = int((self.zoom_ratio / prev_zoom - 1) * 100)
+            print(f"Zoom In: +{percent_change}%")
+            self.display_image(self.original_img, zoom=True)
 
     def zoom_out(self):
-        if self.current_img is not None:
-            self.zoom_ratio /= 1.2
-            self._zoom_display()
+        if self.original_img is not None:
+            prev_zoom = self.zoom_ratio
+            self.zoom_ratio /= 1.05  # ลดทีละ 5%
+            percent_change = int((self.zoom_ratio / prev_zoom - 1) * 100)
+            print(f"Zoom Out: {percent_change}%")
+            self.display_image(self.original_img, zoom=True)
 
     def reset_zoom(self):
         if self.original_img is not None:
-            self.zoom_ratio = 1.0
-            self.display_image(self.original_img)
-
-    def _zoom_display(self):
-        if self.original_img is not None:
-            w, h = self.original_img.size
-            new_size = (max(1, int(w * self.zoom_ratio)), max(1, int(h * self.zoom_ratio)))
-            img = self.original_img.resize(new_size, Image.LANCZOS)
-            self.display_image(img)
+            self.zoom_ratio = min(PREVIEW_WIDTH / self.original_img.size[0], PREVIEW_HEIGHT / self.original_img.size[1])
+            self.display_image(self.original_img, zoom=False)
 
     def toggle_items_table(self):
         self.items_table_visible = not self.items_table_visible
@@ -352,60 +551,67 @@ class OCRApp:
             messagebox.showwarning("No file", "กรุณาเลือกไฟล์ภาพก่อน")
             return
         try:
-            # ถ้าเป็น PDF ให้แปลงเป็นรูปภาพก่อน
             ext = os.path.splitext(self.file_path)[1].lower()
-            if ext == '.pdf':
-                # แปลง PDF หน้าแรกเป็นรูปภาพ
-                image = self.pdf_page_to_image(self.file_path)
-                # บันทึกเป็นไฟล์ชั่วคราว
-                temp_path = os.path.join(os.path.dirname(self.file_path), "temp_ocr.png")
-                image.save(temp_path, "PNG")
-                file_to_send = temp_path
+            results = []
+            
+            if (ext == '.pdf'):
+                # แปลง PDF ทุกหน้าเป็นรูปภาพ
+                images = self.pdf_to_images(self.file_path)
+                for i, image in enumerate(images):
+                    # บันทึกเป็นไฟล์ชั่วคราว
+                    temp_path = os.path.join(os.path.dirname(self.file_path), f"temp_ocr_{i}.png")
+                    image.save(temp_path, "PNG")
+                    
+                    # ส่งไฟล์ไปยัง API
+                    with open(temp_path, "rb") as f:
+                        files = {'file': (os.path.basename(temp_path), f, 'image/png')}
+                        headers = {'apikey': API_KEY}
+                        data = {'return_image': 'false', 'return_ocr': 'false'}
+                        resp = requests.post(OCR_URL, headers=headers, files=files, data=data)
+                        resp.raise_for_status()
+                        result = resp.json()
+                        if result.get("message") == "success":
+                            results.append(result)
+                    
+                    # ลบไฟล์ชั่วคราว
+                    os.remove(temp_path)
             else:
-                file_to_send = self.file_path
+                # กรณีเป็นรูปภาพ ทำแบบเดิม
+                with open(self.file_path, "rb") as f:
+                    files = {'file': (os.path.basename(self.file_path), f, 'image/png')}
+                    headers = {'apikey': API_KEY}
+                    data = {'return_image': 'false', 'return_ocr': 'false'}
+                    resp = requests.post(OCR_URL, headers=headers, files=files, data=data)
+                    resp.raise_for_status()
+                    results.append(resp.json())
 
-            # ส่งไฟล์ไปยัง API
-            with open(file_to_send, "rb") as f:
-                files = {'file': (os.path.basename(file_to_send), f, 'image/png')}
-                headers = {'apikey': API_KEY}
-                data = {'return_image': 'false', 'return_ocr': 'false'}
-                resp = requests.post(OCR_URL, headers=headers, files=files, data=data)
-                resp.raise_for_status()
-                result = resp.json()
-
-            # ลบไฟล์ชั่วคราวถ้าเป็น PDF
-            if ext == '.pdf' and os.path.exists(temp_path):
-                os.remove(temp_path)
-
-            if result.get("message") == "success":
-                processed = result.get("processed", {})
-                # Fill all fields
-                for label, key in self.fields:
-                    value = processed.get(key, "")
-                    self.entries[key].delete(0, tk.END)
-                    self.entries[key].insert(0, str(value) if value is not None else "")
-                # Show items as table
-                items = processed.get("items", [])
-                self.show_items_table(items)
+            # แสดงผลลัพธ์
+            if results:
+                # รวมข้อมูลจากทุกหน้า
+                all_items = []
+                for result in results:
+                    if result.get("message") == "success":
+                        processed = result.get("processed", {})
+                        # เก็บข้อมูล fields จากหน้าแรกเท่านั้น
+                        if result == results[0]:
+                            for label, key in self.fields:
+                                value = processed.get(key, "")
+                                self.entries[key].delete(0, tk.END)
+                                self.entries[key].insert(0, str(value) if value is not None else "")
+                        # รวมรายการสินค้าจากทุกหน้า
+                        items = processed.get("items", [])
+                        all_items.extend(items)
+                
+                # แสดงตารางรายการสินค้าทั้งหมด
+                self.show_items_table(all_items)
             else:
-                messagebox.showerror("OCR Failed", f"OCR API error: {result.get('message')}")
+                messagebox.showerror("OCR Failed", "ไม่พบผลลัพธ์จาก OCR")
+
         except Exception as e:
             messagebox.showerror("Error", str(e))
 
     def load_config(self):
         json_path = os.path.join(os.path.dirname(__file__), "config_fields.json")
-        if not os.path.exists(json_path):
-            # สร้างไฟล์ตัวอย่างถ้ายังไม่มี
-            sample = {
-                "fields": [
-                    ["วันที่เอกสาร", "invoiceDate"],
-                    ["ผู้จัดจำหน่าย", "supplierName"],
-                    ["คำอธิบาย", "description"]
-                ],
-                "product_codes": ["P001", "P002", "P003", "P004"]
-            }
-            with open(json_path, "w", encoding="utf-8") as f:
-                json.dump(sample, f, ensure_ascii=False, indent=2)
         try:
             with open(json_path, "r", encoding="utf-8") as f:
                 config = json.load(f)
@@ -489,6 +695,18 @@ class OCRApp:
         mode = "RGBA" if pix.alpha else "RGB"
         img = Image.frombytes(mode, [pix.width, pix.height], pix.samples)
         return img
+
+    def pdf_to_images(self, pdf_path):
+        """แปลง PDF เป็นรูปภาพทุกหน้า"""
+        doc = fitz.open(pdf_path)
+        images = []
+        for page_num in range(doc.page_count):
+            page = doc[page_num]
+            pix = page.get_pixmap()
+            img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
+            images.append(img)
+        doc.close()
+        return images
 
 if __name__ == "__main__":
     root = tk.Tk()
