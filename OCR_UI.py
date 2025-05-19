@@ -31,6 +31,7 @@ class OCRApp:
         # --- สำหรับ multi-image ---
         self.image_paths = []
         self.current_image_index = 0
+        self.file_path = None  # <--- เพิ่มบรรทัดนี้ไว้ต้น __init__ เพื่อป้องกัน AttributeError
 
         self._setup_styles()
         self._setup_main_frame()
@@ -346,10 +347,12 @@ class OCRApp:
         if paths:
             self.image_paths = list(paths)
             self.current_image_index = 0
+            self.file_path = self.image_paths[0]  # <--- เพิ่มบรรทัดนี้ เพื่อ sync file_path กับรูปแรก
             self.show_image_at_index(self.current_image_index)
         else:
             self.image_paths = []
             self.current_image_index = 0
+            self.file_path = None  # <--- เพิ่มบรรทัดนี้ เพื่อ reset file_path ถ้าไม่เลือกไฟล์
             self.show_empty_preview()
         self.update_nav_buttons()
 
@@ -360,7 +363,7 @@ class OCRApp:
         path = self.image_paths[idx]
         ext = os.path.splitext(path)[1].lower()
         try:
-            if ext == ".pdf":
+            if (ext == ".pdf"):
                 img = self.pdf_page_to_image(path, page_num=0)
             else:
                 img = Image.open(path)
